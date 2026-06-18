@@ -1,5 +1,5 @@
 """
-cloud_app.py — the CLOUD half (deploy this on Render).
+main.py — the CLOUD half (deploy this on Render).
 
 Render is on the public internet and CANNOT reach your ESP32 (your router blocks
 inbound). So this app never talks to the robot. Instead:
@@ -16,7 +16,7 @@ DEPLOY ON RENDER
 ----------------
   • New > Web Service > point at your repo (or upload these files).
   • Build command:  pip install -r requirements.txt
-  • Start command:  uvicorn cloud_app:app --host 0.0.0.0 --port $PORT
+  • Start command:  uvicorn main:app --host 0.0.0.0 --port $PORT
   • Environment variable:  RELAY_TOKEN = <a long random secret>
     (use the SAME value in listener.py — it's the shared password)
 
