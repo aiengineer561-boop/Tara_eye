@@ -17,8 +17,6 @@ DEPLOY ON RENDER
   • New > Web Service > point at your repo (or upload these files).
   • Build command:  pip install -r requirements.txt
   • Start command:  uvicorn main:app --host 0.0.0.0 --port $PORT
-  • Environment variable:  RELAY_TOKEN = <a long random secret>
-    (use the SAME value in listener.py — it's the shared password)
 
 Notes
   • Free Render services sleep when idle. The listener's long-poll keeps hitting
@@ -36,7 +34,7 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -44,8 +42,6 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------- #
 # Config + shared state (in memory)                                           #
 # --------------------------------------------------------------------------- #
-TOKEN = os.environ.get("RELAY_TOKEN", "changeme")
-
 EMOTIONS = [
     "neutral", "happy", "joy", "love", "starstruck", "surprised",
     "curious", "suspicious", "sad", "angry", "sleepy", "dizzy",
@@ -55,14 +51,6 @@ QUEUE: "deque[dict]" = deque(maxlen=200)          # commands waiting for the lis
 LOG: "deque[dict]" = deque(maxlen=400)            # device log mirror: {seq, line}
 mirror = {"last_report": 0.0, "status": None, "error": None}
 _log_seq = 0
-
-
-# --------------------------------------------------------------------------- #
-# Auth — every data endpoint needs the shared token in the X-Token header      #
-# --------------------------------------------------------------------------- #
-def auth(x_token: str = Header(default="")) -> None:
-    if x_token != TOKEN:
-        raise HTTPException(status_code=401, detail="bad or missing access token")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,28 +79,28 @@ def _push(item: dict) -> dict:
 
 # ----- endpoints the BROWSER calls (enqueue) ------------------------------- #
 @app.post("/emotion/{name}")
-async def enqueue_emotion(name: str, _: None = Depends(auth)):
+async def enqueue_emotion(name: str):
     return _push({"type": "emotion", "name": name})
 
 
 @app.post("/blink")
-async def enqueue_blink(_: None = Depends(auth)):
+async def enqueue_blink():
     return _push({"type": "blink"})
 
 
 @app.post("/cmd")
-async def enqueue_cmd(body: CmdIn, _: None = Depends(auth)):
+async def enqueue_cmd(body: CmdIn):
     return _push({"type": "cmd", "c": body.c})
 
 
 @app.post("/media/{action}")
-async def enqueue_media(action: str, target: str = "both", _: None = Depends(auth)):
+async def enqueue_media(action: str, target: str = "both"):
     return _push({"type": "media", "action": action, "target": target})
 
 
 # ----- endpoints the LISTENER calls ---------------------------------------- #
 @app.get("/pull")
-async def pull(_: None = Depends(auth)):
+async def pull():
     """Long-poll: hold up to ~25s waiting for a command, then return what's queued."""
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
@@ -126,7 +114,7 @@ async def pull(_: None = Depends(auth)):
 
 
 @app.post("/report")
-async def report(rep: ReportIn, _: None = Depends(auth)):
+async def report(rep: ReportIn):
     """Listener pushes the device's current status + new log lines up to us."""
     global _log_seq
     mirror["last_report"] = time.time()
@@ -140,7 +128,7 @@ async def report(rep: ReportIn, _: None = Depends(auth)):
 
 # ----- endpoint the BROWSER polls for live state --------------------------- #
 @app.get("/state")
-async def state(after: int = 0, _: None = Depends(auth)):
+async def state(after: int = 0):
     fresh = (time.time() - mirror["last_report"]) < 12
     new = [x["line"] for x in LOG if x["seq"] > after]
     seq = LOG[-1]["seq"] if LOG else after
@@ -156,7 +144,7 @@ async def state(after: int = 0, _: None = Depends(auth)):
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "pending": len(QUEUE), "token_set": TOKEN != "changeme"}
+    return {"ok": True, "pending": len(QUEUE)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -275,8 +263,6 @@ HTML_PAGE = r'''<!doctype html>
 </style>
 </head>
 <body>
-  <div class="banner" id="banner">Enter the access token (your RELAY_TOKEN) in Connection below to control the eyes.</div>
-
   <header>
     <div class="brand">
       <div class="eyebrow">ESP32 · cloud + listener</div>
@@ -353,11 +339,7 @@ HTML_PAGE = r'''<!doctype html>
 
     <div class="card">
       <h2>Connection</h2>
-      <label class="label" for="tokenInput">Access token (must match RELAY_TOKEN)</label>
-      <div class="field">
-        <input type="password" id="tokenInput" placeholder="shared secret" autocomplete="off">
-        <button class="send" id="tokenSave">save</button>
-      </div>
+      <label class="label">Where the listener and device stand right now</label>
       <div class="meta" id="meta">—</div>
     </div>
   </div>
@@ -425,8 +407,6 @@ function gazeTo(dir){
 }
 
 // ---- networking (talks to the CLOUD queue, not the device) ---------------- //
-let TOKEN = localStorage.getItem('eyes_token') || '';
-function showBanner(on){ document.getElementById('banner').classList.toggle('show', on); }
 function logLine(text, cls){
   const box=document.getElementById('log');
   const div=document.createElement('div');
@@ -436,13 +416,10 @@ function logLine(text, cls){
 }
 async function call(method, path, body){
   const opt={method, headers:{}};
-  if(TOKEN) opt.headers['X-Token']=TOKEN;
   if(body!==undefined){ opt.headers['Content-Type']='application/json'; opt.body=JSON.stringify(body); }
   const r=await fetch(path, opt);
   let data; try{ data=await r.json(); }catch{ data={ok:r.ok}; }
-  if(r.status===401){ showBanner(true); throw new Error('set access token'); }
   if(!r.ok) throw new Error(data.detail||('HTTP '+r.status));
-  showBanner(false);
   return data;
 }
 
@@ -491,7 +468,7 @@ async function pollState(){
       document.getElementById('meta').textContent=where+(up?'  ·  '+up:'')+(st.heap?'  ·  '+Math.round(st.heap/1024)+'k free':'');
     }
   }catch(e){
-    pill.className='pill down'; txt.textContent=(e.message==='set access token')?'set token':'cloud error';
+    pill.className='pill down'; txt.textContent='cloud error';
   }
 }
 
@@ -514,14 +491,7 @@ function build(){
   document.getElementById('cmdSend').onclick=()=>{ sendCmd(ci.value); ci.value=''; };
   ci.addEventListener('keydown',e=>{ if(e.key==='Enter'){ sendCmd(ci.value); ci.value=''; } });
 
-  const ti=document.getElementById('tokenInput'); ti.value=TOKEN;
-  document.getElementById('tokenSave').onclick=()=>{
-    TOKEN=ti.value.trim(); localStorage.setItem('eyes_token',TOKEN);
-    showBanner(!TOKEN); logLine('# token saved','sys'); pollState();
-  };
-
   setEyes('neutral');
-  if(!TOKEN) showBanner(true);
   pollState(); setInterval(pollState, 1600);
   setTimeout(idleLoop, 6000);
 }
